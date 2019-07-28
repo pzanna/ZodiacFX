@@ -359,7 +359,6 @@ void packet_fields_parser(uint8_t *pBuffer, struct packet_fields *fields) {
 int flowmatch13(uint8_t *pBuffer, int port, uint8_t table_id, struct packet_fields *fields)
 {
 	int matched_flow = -1;
-	int priority_match = -1;
 	uint8_t *eth_dst = pBuffer;
 	uint8_t *eth_src = pBuffer + 6;
 	uint16_t oxm_value16;
@@ -387,110 +386,92 @@ int flowmatch13(uint8_t *pBuffer, int port, uint8_t table_id, struct packet_fiel
 		// If the flow has no match fields (full wild) it is an automatic match
 		if (ofp13_oxm_match[i] ==  NULL)
 		{
-			if (matched_flow == -1 || (ntohs(flow_match13[i]->priority) > ntohs(flow_match13[matched_flow]->priority))) matched_flow = i;
+			if (matched_flow == -1 ||
+				(ntohs(flow_match13[i]->priority) > ntohs(flow_match13[matched_flow]->priority)))
+				matched_flow = i;
 			continue;
 		}
 		// If this flow is of a lower priority then one that is already match then there is no point going through a check.
-		if (matched_flow > -1 && (ntohs(flow_match13[matched_flow]->priority) >= ntohs(flow_match13[i]->priority))) continue;
+		if (matched_flow > -1 &&
+			(ntohs(flow_match13[matched_flow]->priority) >= ntohs(flow_match13[i]->priority)))
+			continue;
 
 		// Main flow match loop
-		priority_match = 0;
+		bool fields_match = true;
 		uint8_t *hdr = ofp13_oxm_match[i];
 		uint8_t *tail = hdr + ntohs(flow_match13[i]->match.length) - 4;
-		while (hdr < tail)
+		while (fields_match && hdr < tail)
 		{
+			bool loop_match = false;
 			uint32_t field = ntohl(*(uint32_t*)(hdr));
 			uint8_t *oxm_value = hdr + 4;
 			hdr += 4 + OXM_LENGTH(field);
 
+			// Require (+ve) field match to move onto next field
+			fields_match = false;
 			switch(field)
 			{
 				case OXM_OF_IN_PORT:
-				if (port != ntohl(*(uint32_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (port == ntohl(*(uint32_t*)oxm_value));
 				break;
 
 				case OXM_OF_ETH_DST:
-				if (memcmp(eth_dst, oxm_value, 6) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(eth_dst, oxm_value, 6) == 0);
 				break;
 
 				case OXM_OF_ETH_DST_W:
+				loop_match = true;
 				for (int j=0; j<6; j++ )
 				{
-					if ((oxm_value[j] & oxm_value[6+j]) != eth_dst[j] & oxm_value[6+j]){
-						priority_match = -1;
-					}
+					loop_match &= ((oxm_value[j] & oxm_value[6+j]) ==
+									(eth_dst[j] & oxm_value[6+j]));
 				}
+				fields_match = loop_match;
 				break;
 
 				case OXM_OF_ETH_SRC:
-				if (memcmp(eth_src, oxm_value, 6) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(eth_src, oxm_value, 6) == 0);
 				break;
 
 				case OXM_OF_ETH_SRC_W:
+				loop_match = true;
 				for (int j=0; j<6; j++ )
 				{
-					if ((oxm_value[j] & oxm_value[6+j]) != eth_src[j] & oxm_value[6+j]){
-						priority_match = -1;
-					}
+					loop_match &= ((oxm_value[j] & oxm_value[6+j]) ==
+									(eth_src[j] & oxm_value[6+j]));
 				}
+				fields_match = loop_match;
 				break;
 
 				case OXM_OF_ETH_TYPE:
-				if (fields->eth_prot != *(uint16_t*)oxm_value)
-				{
-					if(*(uint16_t*)oxm_value != htons(0x8847) && *(uint16_t*)oxm_value != htons(0x8848))
-					{
-						priority_match = -1;
-					} else {
-						if (!fields->isMPLSTag)
-						{
-							priority_match = -1;
-						}
-					}
-				}
+				fields_match = ((fields->eth_prot == *(uint16_t*)oxm_value) ||
+								*(uint16_t*)oxm_value == htons(0x8847) ||
+								*(uint16_t*)oxm_value == htons(0x8848) ||
+								fields->isMPLSTag);
 				break;
 
 				case OXM_OF_IP_DSCP:
-				priority_match = -1;
-				if (fields->eth_prot == htons(0x0800)){
+				if (fields->eth_prot == htons(0x0800))
+				{
 					struct ip_hdr *iph = fields->payload;
-					if(IPH_TOS(iph)>>2 == oxm_value[0]){
-						priority_match = 0;
-					}
+					fields_match = ((IPH_TOS(iph)>>2) == oxm_value[0]);
 				}
 				break;
 
 				case OXM_OF_IP_ECN:
-				priority_match = -1;
-				if (fields->eth_prot == htons(0x0800)){
+				if (fields->eth_prot == htons(0x0800))
+				{
 					struct ip_hdr *iph = fields->payload;
-					if((IPH_TOS(iph)&03) == oxm_value[0]){
-						priority_match = 0;
-					}
+					fields_match = ((IPH_TOS(iph)&03) == oxm_value[0]);
 				}
 				break;
 
 				case OXM_OF_IP_PROTO:
-				if (fields->ip_prot != *oxm_value)
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->ip_prot == *oxm_value);
 				break;
 
 				case OXM_OF_IPV4_SRC:
-				if (memcmp(&fields->ip_src, oxm_value, 4) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(&fields->ip_src, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_IPV4_SRC_W:
@@ -499,17 +480,11 @@ int flowmatch13(uint8_t *pBuffer, int port, uint8_t table_id, struct packet_fiel
 				{
 					oxm_ipv4[j] &= oxm_value[4+j];
 				}
-				if (memcmp(oxm_ipv4, oxm_value, 4) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(oxm_ipv4, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_IPV4_DST:
-				if (memcmp(&fields->ip_dst, oxm_value, 4) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(&fields->ip_dst, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_IPV4_DST_W:
@@ -518,228 +493,152 @@ int flowmatch13(uint8_t *pBuffer, int port, uint8_t table_id, struct packet_fiel
 				{
 					oxm_ipv4[j] &= oxm_value[4+j];
 				}
-				if (memcmp(oxm_ipv4, oxm_value, 4) != 0)
-				{
-					priority_match = -1;
-				}
+				fields_match = (memcmp(oxm_ipv4, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_TCP_SRC:
-				if (!(fields->ip_prot == 6 && fields->tp_src == *(uint16_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->ip_prot == IP_PROTO_TCP &&
+								fields->tp_src == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_TCP_DST:
-				if (!(fields->ip_prot == 6 && fields->tp_dst == *(uint16_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->ip_prot == IP_PROTO_TCP &&
+								fields->tp_dst == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_UDP_SRC:
-				if (!(fields->ip_prot == 17 && fields->tp_src == *(uint16_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->ip_prot == IP_PROTO_UDP &&
+								fields->tp_src == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_UDP_DST:
-				if (!(fields->ip_prot == 17 && fields->tp_dst == *(uint16_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->ip_prot == IP_PROTO_UDP &&
+								fields->tp_dst == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_VLAN_VID:
 				if (fields->isVlanTag)
 				{
 					oxm_value16 = htons(OFPVID_PRESENT | ntohs(fields->vlanid));
-				}else{
+				} else {
 					oxm_value16 = htons(OFPVID_NONE);
 				}
-				if (oxm_value16 != *(uint16_t*)oxm_value)
-				{
-					priority_match = -1;
-				}
+				fields_match = (oxm_value16 == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_VLAN_VID_W:
 				if (fields->isVlanTag)
 				{
 					oxm_value16 = htons(OFPVID_PRESENT | ntohs(fields->vlanid));
-				}else{
+				} else {
 					oxm_value16 = htons(OFPVID_NONE);
 				}
 				oxm_value16 &= *(uint16_t*)(oxm_value+2);
-				if (oxm_value16 != *(uint16_t*)oxm_value)
-				{
-					priority_match = -1;
-				}
+				fields_match = (oxm_value16 == *(uint16_t*)oxm_value);
 				break;
 
 				case OXM_OF_VLAN_PCP:
-				if (!(fields->isVlanTag && (pBuffer[14]>>5) == oxm_value[0]))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->isVlanTag &&
+								(pBuffer[14]>>5) == oxm_value[0]);
 				break;
 
 				case OXM_OF_MPLS_LABEL:
-				if (!(fields->isMPLSTag && ntohl(fields->mpls_label) == *(uint32_t*)oxm_value))
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->isMPLSTag &&
+								ntohl(fields->mpls_label) == *(uint32_t*)oxm_value);
 				break;
-							
+
 				case OXM_OF_MPLS_TC:
-				if (fields->isMPLSTag && fields->mpls_tc != *oxm_value)
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->isMPLSTag &&
+								fields->mpls_tc == *oxm_value);
 				break;
 				
 				case OXM_OF_MPLS_BOS:
-				if (fields->isMPLSTag && fields->mpls_bos != *oxm_value)
-				{
-					priority_match = -1;
-				}
+				fields_match = (fields->isMPLSTag &&
+								fields->mpls_bos == *oxm_value);
 				break;
 
 				case OXM_OF_ARP_OP:
-				if (fields->eth_prot != htons(0x0806))
-				{
-					priority_match = -1;
-				} else {
-					if (fields->arp_op != *(uint16_t*)oxm_value)
-					{
-						priority_match = -1;
-					}
-				}
+				fields_match = (fields->eth_prot == htons(0x0806) &&
+								fields->arp_op == *(uint16_t*)oxm_value);
 				break;
 				
 				case OXM_OF_ARP_SPA:
-				if (fields->eth_prot != htons(0x0806))
-				{
-					priority_match = -1;
-				} else {
-					if (memcmp(&fields->arp_spa, oxm_value, 4) != 0)
-					{
-						priority_match = -1;
-					}
-				}
+				fields_match = (fields->eth_prot == htons(0x0806) &&
+								memcmp(&fields->arp_spa, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_ARP_SPA_W:
-				if (fields->eth_prot != htons(0x0806))
+				if (fields->eth_prot == htons(0x0806))
 				{
-					priority_match = -1;
-				} else {
 					memcpy(oxm_ipv4, &fields->arp_spa, 4);
 					for (int j=0; j<4; j++)
 					{
 						oxm_ipv4[j] &= oxm_value[4+j];
 					}
-					if (memcmp(oxm_ipv4, oxm_value, 4) != 0)
-					{
-						priority_match = -1;
-					}
+					fields_match = (memcmp(oxm_ipv4, oxm_value, 4) == 0);
 				}
 				break;
 				
 				case OXM_OF_ARP_TPA:
-				if (fields->eth_prot != htons(0x0806))
-				{
-					priority_match = -1;
-				} else {
-					if (memcmp(&fields->arp_tpa, oxm_value, 4) != 0)
-					{
-						priority_match = -1;
-					}
-				}
+				fields_match = (fields->eth_prot == htons(0x0806) &&
+								memcmp(&fields->arp_tpa, oxm_value, 4) == 0);
 				break;
 
 				case OXM_OF_ARP_TPA_W:
-				if (fields->eth_prot != htons(0x0806))
+				if (fields->eth_prot == htons(0x0806))
 				{
-					priority_match = -1;
-				} else {
 					memcpy(oxm_ipv4, &fields->arp_tpa, 4);
 					for (int j=0; j<4; j++)
 					{
 						oxm_ipv4[j] &= oxm_value[4+j];
 					}
-					if (memcmp(oxm_ipv4, oxm_value, 4) != 0)
-					{
-						priority_match = -1;
-					}
+					fields_match = (memcmp(oxm_ipv4, oxm_value, 4) == 0);
 				}
 				break;
 				
 				case OXM_OF_ARP_SHA:
-				if (fields->eth_prot != htons(0x0806))
-				{
-					priority_match = -1;
-				} else {
-					if (memcmp(&fields->arp_sha, oxm_value, 6) != 0)
-					{
-						priority_match = -1;
-					}
-				}
+				fields_match = (fields->eth_prot == htons(0x0806) &&
+								memcmp(&fields->arp_sha, oxm_value, 6) == 0);
 				break;
 
 				case OXM_OF_ARP_SHA_W:
-				if (fields->eth_prot != htons(0x0806))
+				if (fields->eth_prot == htons(0x0806))
 				{
-					priority_match = -1;
-				} else {
+					loop_match = true;
 					for (int j=0; j<6; j++ )
 					{
-						if ((oxm_value[j] & oxm_value[6+j]) != fields->arp_sha[j] & oxm_value[6+j]){
-							priority_match = -1;
-						}
+						loop_match &= ((oxm_value[j] & oxm_value[6+j]) ==
+									   (fields->arp_sha[j] & oxm_value[6+j]));
 					}
+					fields_match = loop_match;
 				}
 				break;
 				
 				case OXM_OF_ARP_THA:
-				if (fields->eth_prot != htons(0x0806))
-				{
-					priority_match = -1;
-				} else {
-					if (memcmp(&fields->arp_tha, oxm_value, 6) != 0)
-					{
-						priority_match = -1;
-					}
-				}
+				fields_match = (fields->eth_prot == htons(0x0806) &&
+								memcmp(&fields->arp_tha, oxm_value, 6) == 0);
 				break;
 
 				case OXM_OF_ARP_THA_W:
-				if (fields->eth_prot != htons(0x0806))
+				if (fields->eth_prot == htons(0x0806))
 				{
-					priority_match = -1;
-				} else {
+					loop_match = true;
 					for (int j=0; j<6; j++ )
 					{
-						if ((oxm_value[j] & oxm_value[6+j]) != fields->arp_tha[j] & oxm_value[6+j]){
-							priority_match = -1;
-						}
+						loop_match &= ((oxm_value[j] & oxm_value[6+j]) ==
+									   (fields->arp_tha[j] & oxm_value[6+j]));
 					}
+					fields_match = loop_match;
 				}
 				break;
 												
 				default:
-				priority_match = -1;
-				break;
-			}
-
-			if (priority_match == -1)
-			{
+				TRACE("of_helper.c: flow %d: unsupported field (0x%08x) - flow ignored !",
+				      i+1, field);
 				break;
 			}
 		}
-		if (priority_match != -1)
+		if (fields_match)
 		{
 			matched_flow = i;
 		}
